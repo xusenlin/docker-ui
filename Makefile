@@ -10,10 +10,11 @@
 
 # Default values
 IMG ?= ghcr.io/xusenlin/docker-ui:latest
+PLATFORM ?= linux/amd64
 
 .PHONY: build
-build: ## Build Docker image (IMG=xxx)
-	docker build -t $(IMG) .
+build: ## Build Docker image (IMG=xxx PLATFORM=linux/arm64)
+	docker build -t $(IMG) --platform $(PLATFORM) .
 
 .PHONY: push
 push: ## Push Docker image to registry

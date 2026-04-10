@@ -12,7 +12,7 @@ RUN go mod download
 
 COPY . .
 # Build static assets if needed (or embed via go:embed)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-w -s" -o server ./cmd/server
 
 # Stage 2: Runtime image
 FROM scratch
