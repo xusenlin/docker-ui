@@ -2,12 +2,16 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 
 	"docker-ui/internal/model"
 )
@@ -163,4 +167,160 @@ func (c *Client) PauseContainer(ctx context.Context, id string) error {
 
 func (c *Client) UnpauseContainer(ctx context.Context, id string) error {
 	return c.cli.ContainerUnpause(ctx, id)
+}
+
+func (c *Client) GetRecreateConfig(ctx context.Context, id string) (*model.ContainerRecreateConfig, error) {
+	raw, err := c.cli.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("inspect container %s: %w", id, err)
+	}
+
+	portBindings := make(map[string][]model.PortBinding)
+	for containerPort, bindings := range raw.NetworkSettings.Ports {
+		for _, b := range bindings {
+			portBindings[string(containerPort)] = append(portBindings[string(containerPort)], model.PortBinding{
+				HostIP:   b.HostIP,
+				HostPort: b.HostPort,
+			})
+		}
+	}
+
+	mounts := make([]model.MountConfig, 0, len(raw.Mounts))
+	for _, m := range raw.Mounts {
+		mounts = append(mounts, model.MountConfig{
+			Source:      m.Source,
+			Destination: m.Destination,
+			Mode:        m.Mode,
+			ReadOnly:    m.RW == false,
+		})
+	}
+
+	config := &model.ContainerRecreateConfig{
+		Name:          strings.TrimPrefix(raw.Name, "/"),
+		Image:         raw.Config.Image,
+		State:         raw.State.Status,
+		EnvVars:       raw.Config.Env,
+		Cmd:           raw.Config.Cmd,
+		WorkingDir:    raw.Config.WorkingDir,
+		NetworkMode:   string(raw.HostConfig.NetworkMode),
+		PortBindings:  portBindings,
+		Mounts:        mounts,
+		RestartPolicy: string(raw.HostConfig.RestartPolicy.Name),
+		Memory:        raw.HostConfig.Memory,
+		CPUQuota:      raw.HostConfig.CPUQuota,
+		Privileged:    raw.HostConfig.Privileged,
+		User:          raw.Config.User,
+		Hostname:      raw.Config.Hostname,
+	}
+
+	return config, nil
+}
+
+func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerRecreateConfig) (string, error) {
+	if err := c.cli.ContainerRemove(ctx, config.Name, container.RemoveOptions{Force: true}); err != nil {
+		return "", fmt.Errorf("remove container %s: %w", config.Name, err)
+	}
+
+	envVars := make([]string, 0, len(config.EnvVars))
+	for _, e := range config.EnvVars {
+		envVars = append(envVars, e)
+	}
+
+	hostConfig := &container.HostConfig{
+		Resources: container.Resources{
+			Memory:   config.Memory,
+			CPUQuota: config.CPUQuota,
+		},
+		Privileged: config.Privileged,
+		RestartPolicy: container.RestartPolicy{
+			Name: container.RestartPolicyMode(config.RestartPolicy),
+		},
+	}
+
+	if len(config.Mounts) > 0 {
+		binds := make([]string, 0)
+		for _, m := range config.Mounts {
+			bind := m.Source + ":" + m.Destination
+			if m.ReadOnly {
+				bind += ":ro"
+			}
+			binds = append(binds, bind)
+		}
+		hostConfig.Binds = binds
+	}
+
+	if len(config.PortBindings) > 0 {
+		portBindings := make(map[nat.Port][]nat.PortBinding)
+		for containerPort, bindings := range config.PortBindings {
+			natPort := nat.Port(containerPort)
+			for _, b := range bindings {
+				portBindings[natPort] = append(portBindings[natPort], nat.PortBinding{
+					HostIP:   b.HostIP,
+					HostPort: b.HostPort,
+				})
+			}
+		}
+		hostConfig.PortBindings = portBindings
+	}
+
+	networkingConfig := &network.NetworkingConfig{}
+	if config.NetworkMode != "" && config.NetworkMode != "default" {
+		networkingConfig = &network.NetworkingConfig{
+			EndpointsConfig: map[string]*network.EndpointSettings{
+				config.NetworkMode: {},
+			},
+		}
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, &container.Config{
+		Image:        config.Image,
+		Env:          envVars,
+		Cmd:          config.Cmd,
+		WorkingDir:   config.WorkingDir,
+		User:         config.User,
+		Hostname:     config.Hostname,
+		ExposedPorts: getExposedPorts(config.PortBindings),
+	}, hostConfig, networkingConfig, nil, config.Name)
+	if err != nil {
+		return "", fmt.Errorf("create container: %w", err)
+	}
+
+	if config.State == "running" {
+		if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+			return "", fmt.Errorf("start container: %w", err)
+		}
+	} else if config.State == "paused" {
+		if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+			return "", fmt.Errorf("start container: %w", err)
+		}
+		if err := c.cli.ContainerUnpause(ctx, resp.ID); err != nil {
+			return "", fmt.Errorf("unpause container: %w", err)
+		}
+	}
+
+	return resp.ID[:12], nil
+}
+
+func (c *Client) PullImage(ctx context.Context, imageName string) (bool, error) {
+	pullReader, err := c.cli.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		return false, fmt.Errorf("pull image %s: %w", imageName, err)
+	}
+	defer pullReader.Close()
+
+	decoder := json.NewDecoder(pullReader)
+	var hasUpdate bool
+	for decoder.Decode(new(any)) == nil {
+		hasUpdate = true
+	}
+
+	return hasUpdate, nil
+}
+
+func getExposedPorts(portBindings map[string][]model.PortBinding) map[nat.Port]struct{} {
+	exposedPorts := make(map[nat.Port]struct{})
+	for port := range portBindings {
+		exposedPorts[nat.Port(port)] = struct{}{}
+	}
+	return exposedPorts
 }

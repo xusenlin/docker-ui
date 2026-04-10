@@ -160,3 +160,38 @@ func (h *ContainerHandler) Action(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing container id", http.StatusBadRequest)
+		return
+	}
+
+	detail, err := h.docker.GetContainerDetail(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	_, err = h.docker.PullImage(r.Context(), detail.Image)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("pull image failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	config, err := h.docker.GetRecreateConfig(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	newID, err := h.docker.RecreateContainer(r.Context(), config)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": newID})
+}

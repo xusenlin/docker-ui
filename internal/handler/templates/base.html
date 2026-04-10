@@ -152,6 +152,22 @@
         }).catch(err => { alert('Error: ' + err.message); btn.disabled = false; btn.textContent = btn.dataset.label; });
     }
 
+    function updateContainer(id) {
+        if (!confirm('This will stop and recreate the container with the latest image. Continue?')) {
+            return;
+        }
+        fetch('/containers/' + id + '/update', {
+            method: 'POST',
+            credentials: 'include'
+        }).then(r => {
+            if (r.ok) {
+                location.reload();
+            } else {
+                r.text().then(t => { alert('Update failed: ' + t); });
+            }
+        }).catch(err => { alert('Error: ' + err.message); });
+    }
+
     function showContainerDetail(id) {
         modal.classList.add('show');
         modalName.textContent = id;
@@ -208,6 +224,9 @@
                 }
 
                 html += '</div>';
+
+                html += '<div class="detail-actions"><button class="btn btn-primary" onclick="updateContainer(\'' + d.id + '\')">Update Image & Recreate</button></div>';
+
                 modalBody.innerHTML = html;
             })
             .catch(err => {

@@ -18,7 +18,6 @@ func NewImageHandler(dc *docker.Client) *ImageHandler {
 }
 
 func shortenImageName(name string) string {
-	// e.g. "myregistry.com/myrepo/myimage:v1.2.3" -> truncate if too long
 	if len(name) > 40 {
 		return "..." + name[len(name)-37:]
 	}
@@ -38,13 +37,11 @@ func (h *ImageHandler) List(w http.ResponseWriter, r *http.Request) {
 	} else {
 		sb.WriteString(`<div class="card-grid">`)
 		for _, img := range images {
-			// Primary tag: full first tag in header, truncated
 			headerTag := ""
 			if len(img.Tags) > 0 {
 				headerTag = escapeHTML(shortenImageName(img.Tags[0]))
 			}
 
-			// Tags row: only show the :tag suffix, not the full name:tag
 			var tags []string
 			for _, t := range img.Tags {
 				parts := strings.Split(t, ":")
