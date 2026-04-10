@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - Docker UI</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+    #detail-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0,0,0,0.4);
+        backdrop-filter: blur(4px);
+    }
+    #detail-modal.show { display: flex; }
+    .modal-box {
+        background: #fff;
+        border-radius: 16px;
+        width: 580px;
+        max-width: 95vw;
+        max-height: 85vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+    }
+    .modal-header {
+        padding: 1.25rem 1.5rem;
+        border-bottom: 1px solid #f0f0f2;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .modal-header h2 {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #1c1c1e;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .modal-close {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #8e8e93;
+        font-size: 1.25rem;
+        line-height: 1;
+        padding: 0.25rem;
+        border-radius: 6px;
+        transition: all 0.15s;
+    }
+    .modal-close:hover { background: #f5f5f7; color: #1c1c1e; }
+    .modal-body {
+        padding: 1.25rem 1.5rem;
+        overflow-y: auto;
+        flex: 1;
+    }
+    .modal-loading {
+        text-align: center;
+        padding: 3rem;
+        color: #8e8e93;
+        font-size: 0.875rem;
+    }
+    .modal-loading::after {
+        content: '';
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #8e8e93;
+        margin-left: 0.5rem;
+        animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 0.3; }
+        50% { opacity: 1; }
+    }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">Docker UI</div>
+        <div class="nav-links">
+            <a href="/containers" {{if eq .CurrentPage "containers"}}class="active"{{end}}>Containers</a>
+            <a href="/images" {{if eq .CurrentPage "images"}}class="active"{{end}}>Images</a>
+        </div>
+    </nav>
+    <main>
+        <div class="page-header">
+            <h1>{{.Title}}</h1>
+            {{if .Count}}<span class="page-count">{{.Count}} items</span>{{end}}
+        </div>
+        {{.Content}}
+    </main>
+
+    <div id="detail-modal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h2><span id="modal-name"></span> <span id="modal-state" class="badge"></span></h2>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <div class="modal-loading">Loading</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    const modal = document.getElementById('detail-modal');
+    const modalBody = document.getElementById('modal-body');
+    const modalName = document.getElementById('modal-name');
+    const modalState = document.getElementById('modal-state');
+
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeModal();
+    });
+
+    function closeModal() {
+        modal.classList.remove('show');
+    }
+
+    function esc(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function h(s) {
+        return s == null ? '-' : esc(s);
+    }
+
+    function containerAction(id, action, btn) {
+        btn.disabled = true;
+        btn.textContent = '...';
+        fetch('/containers/' + id + '/' + action, {
+            method: 'POST',
+            credentials: 'include'
+        }).then(r => {
+            if (r.ok) {
+                location.reload();
+            } else {
+                r.text().then(t => { alert('Action failed: ' + t); btn.disabled = false; btn.textContent = btn.dataset.label; });
+            }
+        }).catch(err => { alert('Error: ' + err.message); btn.disabled = false; btn.textContent = btn.dataset.label; });
+    }
+
+    function showContainerDetail(id) {
+        modal.classList.add('show');
+        modalName.textContent = id;
+        modalState.className = 'badge';
+        modalState.textContent = '';
+        modalBody.innerHTML = '<div class="modal-loading">Loading</div>';
+
+        fetch('/containers/' + id, { credentials: 'include' })
+            .then(r => r.json())
+            .then(d => {
+                modalName.textContent = d.name || id;
+                modalState.className = 'badge badge-' + (d.state || 'created');
+                modalState.textContent = d.state || '';
+
+                let html = '<div class="detail-grid">';
+
+                const rows = [
+                    ['ID', d.id],
+                    ['Image', d.image],
+                    ['Status', d.status],
+                    ['Created', d.created],
+                    ['Command', d.cmd],
+                    ['Restart', d.restart_policy],
+                    ['Memory', d.memory],
+                    ['CPU Quota', d.cpu_quota],
+                ];
+                for (const [label, val] of rows) {
+                    if (val && val !== '-') {
+                        html += '<div class="detail-row"><span class="detail-label">'+label+'</span><span class="detail-value mono">'+h(val)+'</span></div>';
+                    }
+                }
+
+                if (d.ports && d.ports.length > 0) {
+                    const ports = d.ports.map(p => '<span class="port-tag">'+esc(p.HostPort)+' → '+esc(p.ContainerPort)+'</span>').join('');
+                    html += '<div class="detail-row"><span class="detail-label">Ports</span><span class="detail-value">'+ports+'</span></div>';
+                }
+
+                if (d.networks && d.networks.length > 0) {
+                    const nets = d.networks.map(n => '<span class="tag">'+esc(n)+'</span>').join('');
+                    html += '<div class="detail-row"><span class="detail-label">Networks</span><span class="detail-value">'+nets+'</span></div>';
+                }
+
+                if (d.mounts && d.mounts.length > 0) {
+                    const mounts = d.mounts.map(m => {
+                        let mode = m.Mode ? '<span class="mount-mode">'+esc(m.Mode)+'</span>' : '';
+                        return '<div class="mount-item"><span class="mount-type">'+esc(m.Type)+'</span><span class="mount-src">'+esc(m.Source)+'</span><span class="mount-arrow">→</span><span class="mount-dst">'+esc(m.Destination)+'</span>'+mode+'</div>';
+                    }).join('');
+                    html += '<div class="detail-section"><div class="detail-label">Mounts</div><div class="mount-list">'+mounts+'</div></div>';
+                }
+
+                if (d.env_vars && d.env_vars.length > 0) {
+                    const envs = d.env_vars.map(e => '<div class="env-item"><span class="env-key">'+esc(e.Key)+'</span><span class="env-value">'+esc(e.Value)+'</span></div>').join('');
+                    html += '<div class="detail-section"><div class="detail-label">Env</div><div class="env-list">'+envs+'</div></div>';
+                }
+
+                html += '</div>';
+                modalBody.innerHTML = html;
+            })
+            .catch(err => {
+                modalBody.innerHTML = '<div class="empty">Failed to load: ' + esc(err.message) + '</div>';
+            });
+    }
+    </script>
+</body>
+</html>
