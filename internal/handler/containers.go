@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"docker-ui/internal/docker"
@@ -14,6 +15,11 @@ func init() {
 	if err := initTemplates(); err != nil {
 		panic(err)
 	}
+}
+
+func isImageID(name string) bool {
+	matched, _ := regexp.MatchString(`^[a-f0-9]{64}$|^[a-f0-9]{12}$`, name)
+	return matched
 }
 
 type ContainerHandler struct {
@@ -174,7 +180,16 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.docker.PullImage(r.Context(), detail.Image)
+	imageName := detail.Image
+	if isImageID(imageName) {
+		imageName, err = h.docker.GetImageNameByID(r.Context(), imageName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	_, err = h.docker.PullImage(r.Context(), imageName)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("pull image failed: %v", err), http.StatusInternalServerError)
 		return

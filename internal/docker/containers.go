@@ -217,8 +217,13 @@ func (c *Client) GetRecreateConfig(ctx context.Context, id string) (*model.Conta
 }
 
 func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerRecreateConfig) (string, error) {
-	if err := c.cli.ContainerRemove(ctx, config.Name, container.RemoveOptions{Force: true}); err != nil {
-		return "", fmt.Errorf("remove container %s: %w", config.Name, err)
+	tmpName := config.Name + "-updating"
+	wasRunning := config.State == "running"
+
+	if wasRunning {
+		if err := c.cli.ContainerStop(ctx, config.Name, container.StopOptions{}); err != nil {
+			return "", fmt.Errorf("stop container: %w", err)
+		}
 	}
 
 	envVars := make([]string, 0, len(config.EnvVars))
@@ -280,22 +285,32 @@ func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerR
 		User:         config.User,
 		Hostname:     config.Hostname,
 		ExposedPorts: getExposedPorts(config.PortBindings),
-	}, hostConfig, networkingConfig, nil, config.Name)
+	}, hostConfig, networkingConfig, nil, tmpName)
 	if err != nil {
 		return "", fmt.Errorf("create container: %w", err)
 	}
 
-	if config.State == "running" {
+	if wasRunning || config.State == "paused" {
 		if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+			c.cli.ContainerRemove(ctx, tmpName, container.RemoveOptions{Force: true})
 			return "", fmt.Errorf("start container: %w", err)
 		}
-	} else if config.State == "paused" {
-		if err := c.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-			return "", fmt.Errorf("start container: %w", err)
-		}
+	}
+
+	if config.State == "paused" {
 		if err := c.cli.ContainerUnpause(ctx, resp.ID); err != nil {
+			c.cli.ContainerRemove(ctx, tmpName, container.RemoveOptions{Force: true})
 			return "", fmt.Errorf("unpause container: %w", err)
 		}
+	}
+
+	if err := c.cli.ContainerRemove(ctx, config.Name, container.RemoveOptions{Force: true}); err != nil {
+		c.cli.ContainerRemove(ctx, tmpName, container.RemoveOptions{Force: true})
+		return "", fmt.Errorf("remove old container: %w", err)
+	}
+
+	if err := c.cli.ContainerRename(ctx, resp.ID, config.Name); err != nil {
+		return "", fmt.Errorf("rename container: %w", err)
 	}
 
 	return resp.ID[:12], nil

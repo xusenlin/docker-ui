@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -87,4 +88,21 @@ func (c *Client) ContainerExists(ctx context.Context, id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (c *Client) GetImageNameByID(ctx context.Context, id string) (string, error) {
+	inspect, _, err := c.cli.ImageInspectWithRaw(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("inspect image %s: %w", id, err)
+	}
+	if len(inspect.RepoTags) > 0 {
+		return inspect.RepoTags[0], nil
+	}
+	if len(inspect.RepoDigests) > 0 {
+		parts := strings.Split(inspect.RepoDigests[0], "@")
+		if len(parts) > 0 {
+			return parts[0], nil
+		}
+	}
+	return inspect.ID[:12], nil
 }
