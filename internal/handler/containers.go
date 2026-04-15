@@ -106,6 +106,10 @@ func (h *ContainerHandler) List(w http.ResponseWriter, r *http.Request) {
 	_ = containersTmpl.Execute(w, data)
 }
 
+func isSelfContainer(name string) bool {
+	return name == "docker-ui"
+}
+
 func (h *ContainerHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -134,6 +138,7 @@ func (h *ContainerHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		"networks":       detail.Networks,
 		"mounts":         detail.Mounts,
 		"env_vars":       detail.EnvVars,
+		"is_self":        isSelfContainer(detail.Name),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -174,9 +179,30 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	sendProgress := func(status string, message string) {
+		fmt.Fprintf(w, "event: progress\ndata: {\"status\":\"%s\",\"message\":\"%s\"}\n\n", status, message)
+		flusher.Flush()
+	}
+
+	sendError := func(err string) {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err)
+		flusher.Flush()
+	}
+
+	sendProgress("starting", "Getting container details...")
 	detail, err := h.docker.GetContainerDetail(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		sendError(err.Error())
 		return
 	}
 
@@ -184,29 +210,41 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if isImageID(imageName) {
 		imageName, err = h.docker.GetImageNameByID(r.Context(), imageName)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			sendError(err.Error())
 			return
 		}
 	}
 
-	_, err = h.docker.PullImage(r.Context(), imageName)
+	sendProgress("pulling", "Pulling latest image...")
+	upToDate, err := h.docker.PullImage(r.Context(), imageName, func(status string, detail string) {
+		sendProgress("pulling", detail)
+	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("pull image failed: %v", err), http.StatusInternalServerError)
+		sendError(fmt.Sprintf("pull image failed: %v", err))
 		return
 	}
+	if upToDate {
+		sendProgress("up-to-date", "Image is already up to date, no need to recreate")
+		sendProgress("done", id)
+		flusher.Flush()
+		return
+	}
+	sendProgress("pulled", "New image pulled successfully")
 
+	sendProgress("config", "Getting container configuration...")
 	config, err := h.docker.GetRecreateConfig(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sendError(err.Error())
 		return
 	}
 
+	sendProgress("creating", "Creating new container...")
 	newID, err := h.docker.RecreateContainer(r.Context(), config)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		sendError(err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"id": newID})
+	sendProgress("done", newID)
+	flusher.Flush()
 }

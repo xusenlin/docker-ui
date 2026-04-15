@@ -81,6 +81,87 @@
         0%, 100% { opacity: 0.3; }
         50% { opacity: 1; }
     }
+    .update-log {
+        padding: 0;
+    }
+    .log-entry {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.625rem;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid #f0f0f2;
+        font-size: 0.8125rem;
+        line-height: 1.5;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-icon {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.625rem;
+        font-weight: 700;
+        flex-shrink: 0;
+        margin-top: 1px;
+    }
+    .log-entry.pending .log-icon {
+        background: #e5e5ea;
+        color: #8e8e93;
+    }
+    .log-entry.running .log-icon {
+        background: #007aff;
+        color: #fff;
+        animation: pulse 1s infinite;
+    }
+    .log-entry.success .log-icon {
+        background: #34c759;
+        color: #fff;
+    }
+    .log-entry.error .log-icon {
+        background: #ff3b30;
+        color: #fff;
+    }
+    .log-content {
+        flex: 1;
+        min-width: 0;
+    }
+    .log-title {
+        color: #1c1c1e;
+        font-weight: 500;
+    }
+    .log-detail {
+        color: #8e8e93;
+        font-size: 0.75rem;
+        margin-top: 2px;
+        word-break: break-all;
+    }
+    .log-entry.error .log-title { color: #ff3b30; }
+    .log-entry.error .log-detail { color: #ff3b30; opacity: 0.8; }
+    .update-result {
+        margin-top: 1rem;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        font-size: 0.8125rem;
+        font-weight: 500;
+    }
+    .update-result.success {
+        background: #e8f9ed;
+        color: #1a7f37;
+    }
+    .update-result.error {
+        background: #ffebeb;
+        color: #cf222e;
+    }
+    .self-notice {
+        padding: 0.75rem 1rem;
+        background: #fff8e1;
+        border-radius: 8px;
+        font-size: 0.8125rem;
+        color: #91671c;
+        line-height: 1.5;
+    }
     </style>
 </head>
 <body>
@@ -153,19 +234,131 @@
     }
 
     function updateContainer(id) {
-        if (!confirm('This will stop and recreate the container with the latest image. Continue?')) {
-            return;
-        }
+        modal.classList.add('show');
+        modalName.textContent = 'Updating Container';
+        modalState.className = 'badge badge-running';
+        modalState.textContent = 'Updating';
+        modalBody.innerHTML = '<div class="update-log" id="update-log"></div>';
+
+        const log = document.getElementById('update-log');
+        let entryCount = 0;
+
+        const addEntry = (title, state, detail) => {
+            const icons = { pending: '', running: '...', success: '✓', error: '✗' };
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + state;
+            entry.innerHTML = '<div class="log-icon">' + icons[state] + '</div>' +
+                '<div class="log-content"><div class="log-title">' + esc(title) + '</div>' +
+                (detail ? '<div class="log-detail">' + esc(detail) + '</div>' : '') + '</div>';
+            log.appendChild(entry);
+            entryCount++;
+            modalBody.scrollTop = modalBody.scrollHeight;
+            return entry;
+        };
+
+        const setResult = (success, message) => {
+            const div = document.createElement('div');
+            div.className = 'update-result ' + (success ? 'success' : 'error');
+            div.textContent = message;
+            log.appendChild(div);
+            modalState.className = 'badge badge-' + (success ? 'running' : 'exited');
+            modalState.textContent = success ? 'Done' : 'Failed';
+        };
+
+        addEntry('Getting container details...', 'running');
+
         fetch('/containers/' + id + '/update', {
-            method: 'POST',
+            method: 'GET',
             credentials: 'include'
-        }).then(r => {
-            if (r.ok) {
-                location.reload();
-            } else {
-                r.text().then(t => { alert('Update failed: ' + t); });
+        }).then(async r => {
+            if (!r.ok) {
+                const t = await r.text();
+                log.lastElementChild.className = 'log-entry error';
+                log.lastElementChild.querySelector('.log-icon').textContent = '✗';
+                setResult(false, t);
+                return;
             }
-        }).catch(err => { alert('Error: ' + err.message); });
+            const reader = r.body.getReader();
+            const decoder = new TextDecoder();
+            let dataBuffer = '';
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                dataBuffer += decoder.decode(value, {stream: true});
+                let lines = dataBuffer.split('\n');
+                dataBuffer = lines.pop();
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i];
+                    if (line === 'event: error' && lines[i + 1]) {
+                        const errMsg = lines[i + 1].startsWith('data: ') ? lines[i + 1].slice(6) : lines[i + 1];
+                        log.lastElementChild.className = 'log-entry error';
+                        log.lastElementChild.querySelector('.log-icon').textContent = '✗';
+                        log.lastElementChild.querySelector('.log-title').textContent = 'Error';
+                        if (errMsg) {
+                            const detail = log.lastElementChild.querySelector('.log-detail');
+                            if (detail) { detail.textContent = errMsg; }
+                            else { log.lastElementChild.querySelector('.log-content').insertAdjacentHTML('beforeend', '<div class="log-detail">' + esc(errMsg) + '</div>'); }
+                        }
+                        setResult(false, 'Update failed');
+                        return;
+                    }
+                    if (line === 'event: progress' && lines[i + 1] && lines[i + 1].startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(lines[i + 1].slice(6));
+                            if (data.status === 'done') {
+                                const lastEntry = log.lastElementChild;
+                                if (lastEntry && lastEntry.classList.contains('running')) {
+                                    lastEntry.className = 'log-entry success';
+                                    lastEntry.querySelector('.log-icon').textContent = '✓';
+                                }
+                                if (data.message !== id) {
+                                    addEntry('Container recreated (ID: ' + data.message + ')', 'success');
+                                    setResult(true, 'Update completed successfully');
+                                } else {
+                                    setResult(true, 'Image is already up to date');
+                                }
+                            } else if (data.status === 'up-to-date') {
+                                const lastEntry = log.lastElementChild;
+                                if (lastEntry && lastEntry.classList.contains('running')) {
+                                    lastEntry.className = 'log-entry success';
+                                    lastEntry.querySelector('.log-icon').textContent = '✓';
+                                }
+                                addEntry(data.message, 'success');
+                            } else if (data.status === 'pulling') {
+                                const lastEntry = log.lastElementChild;
+                                if (lastEntry && lastEntry.classList.contains('running') && lastEntry.dataset.pull) {
+                                    const detail = lastEntry.querySelector('.log-detail');
+                                    if (detail) { detail.textContent = data.message; }
+                                    else { lastEntry.querySelector('.log-content').insertAdjacentHTML('beforeend', '<div class="log-detail">' + esc(data.message) + '</div>'); }
+                                } else {
+                                    if (lastEntry && lastEntry.classList.contains('running')) {
+                                        lastEntry.className = 'log-entry success';
+                                        lastEntry.querySelector('.log-icon').textContent = '✓';
+                                    }
+                                    const entry = addEntry('Pulling latest image...', 'running', data.message);
+                                    entry.dataset.pull = '1';
+                                }
+                            } else {
+                                const lastEntry = log.lastElementChild;
+                                if (lastEntry && lastEntry.classList.contains('running')) {
+                                    lastEntry.className = 'log-entry success';
+                                    lastEntry.querySelector('.log-icon').textContent = '✓';
+                                }
+                                addEntry(data.message, 'running');
+                            }
+                        } catch (e) {}
+                        i++;
+                    }
+                }
+            }
+        }).catch(err => {
+            const lastEntry = log.lastElementChild;
+            if (lastEntry && lastEntry.classList.contains('running')) {
+                lastEntry.className = 'log-entry error';
+                lastEntry.querySelector('.log-icon').textContent = '✗';
+            }
+            setResult(false, err.message);
+        });
     }
 
     function showContainerDetail(id) {
@@ -225,7 +418,11 @@
 
                 html += '</div>';
 
-                html += '<div class="detail-actions"><button class="btn btn-primary" onclick="updateContainer(\'' + d.id + '\')">Update Image & Recreate</button></div>';
+                if (d.is_self) {
+                    html += '<div class="detail-actions"><div class="self-notice">This is the Docker UI container itself. Updating it here would stop the service. Please update manually via docker CLI.</div></div>';
+                } else {
+                    html += '<div class="detail-actions"><button class="btn btn-primary" onclick="updateContainer(\'' + d.id + '\')">Update Image & Recreate</button></div>';
+                }
 
                 modalBody.innerHTML = html;
             })

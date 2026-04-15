@@ -195,12 +195,56 @@ func (c *Client) GetRecreateConfig(ctx context.Context, id string) (*model.Conta
 		})
 	}
 
+	var healthcheck *model.HealthcheckConfig
+	if raw.Config.Healthcheck != nil {
+		healthcheck = &model.HealthcheckConfig{
+			Test:    raw.Config.Healthcheck.Test,
+			Retries: int64(raw.Config.Healthcheck.Retries),
+		}
+		if raw.Config.Healthcheck.Interval != 0 {
+			healthcheck.Interval = int64(raw.Config.Healthcheck.Interval / time.Millisecond)
+		}
+		if raw.Config.Healthcheck.Timeout != 0 {
+			healthcheck.Timeout = int64(raw.Config.Healthcheck.Timeout / time.Millisecond)
+		}
+		if raw.Config.Healthcheck.StartPeriod != 0 {
+			healthcheck.StartPeriod = int64(raw.Config.Healthcheck.StartPeriod / time.Millisecond)
+		}
+	}
+
+	var networkConfig *model.NetworkConfig
+	for netName, ep := range raw.NetworkSettings.Networks {
+		aliases := make([]string, 0, len(ep.Aliases))
+		for _, a := range ep.Aliases {
+			if a != id[:12] && a != strings.TrimPrefix(raw.Name, "/") {
+				aliases = append(aliases, a)
+			}
+		}
+		nc := &model.NetworkConfig{
+			NetworkID: ep.NetworkID,
+			Aliases:   aliases,
+		}
+		if ep.IPAMConfig != nil {
+			nc.IPv4 = ep.IPAMConfig.IPv4Address
+			nc.IPv6 = ep.IPAMConfig.IPv6Address
+		}
+		networkConfig = nc
+		_ = netName
+		break
+	}
+
+	logConfig := model.LogConfig{
+		Type:   raw.HostConfig.LogConfig.Type,
+		Config: raw.HostConfig.LogConfig.Config,
+	}
+
 	config := &model.ContainerRecreateConfig{
 		Name:          strings.TrimPrefix(raw.Name, "/"),
 		Image:         raw.Config.Image,
 		State:         raw.State.Status,
 		EnvVars:       raw.Config.Env,
 		Cmd:           raw.Config.Cmd,
+		Entrypoint:    raw.Config.Entrypoint,
 		WorkingDir:    raw.Config.WorkingDir,
 		NetworkMode:   string(raw.HostConfig.NetworkMode),
 		PortBindings:  portBindings,
@@ -208,9 +252,28 @@ func (c *Client) GetRecreateConfig(ctx context.Context, id string) (*model.Conta
 		RestartPolicy: string(raw.HostConfig.RestartPolicy.Name),
 		Memory:        raw.HostConfig.Memory,
 		CPUQuota:      raw.HostConfig.CPUQuota,
+		CPUPeriod:     raw.HostConfig.CPUPeriod,
+		CPUShares:     raw.HostConfig.CPUShares,
 		Privileged:    raw.HostConfig.Privileged,
 		User:          raw.Config.User,
 		Hostname:      raw.Config.Hostname,
+		Domainname:    raw.Config.Domainname,
+		Labels:        raw.Config.Labels,
+		CapAdd:        raw.HostConfig.CapAdd,
+		CapDrop:       raw.HostConfig.CapDrop,
+		DNS:           raw.HostConfig.DNS,
+		DNSSearch:     raw.HostConfig.DNSSearch,
+		ExtraHosts:    raw.HostConfig.ExtraHosts,
+		LogConfig:     logConfig,
+		PIDMode:       string(raw.HostConfig.PidMode),
+		IPCMode:       string(raw.HostConfig.IpcMode),
+		SecurityOpt:   raw.HostConfig.SecurityOpt,
+		Tmpfs:         raw.HostConfig.Tmpfs,
+		Sysctls:       raw.HostConfig.Sysctls,
+		TTY:           raw.Config.Tty,
+		OpenStdin:     raw.Config.OpenStdin,
+		Healthcheck:   healthcheck,
+		NetworkConfig: networkConfig,
 	}
 
 	return config, nil
@@ -233,13 +296,29 @@ func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerR
 
 	hostConfig := &container.HostConfig{
 		Resources: container.Resources{
-			Memory:   config.Memory,
-			CPUQuota: config.CPUQuota,
+			Memory:    config.Memory,
+			CPUQuota:  config.CPUQuota,
+			CPUPeriod: config.CPUPeriod,
+			CPUShares: config.CPUShares,
 		},
 		Privileged: config.Privileged,
 		RestartPolicy: container.RestartPolicy{
 			Name: container.RestartPolicyMode(config.RestartPolicy),
 		},
+		LogConfig: container.LogConfig{
+			Type:   config.LogConfig.Type,
+			Config: config.LogConfig.Config,
+		},
+		CapAdd:      config.CapAdd,
+		CapDrop:     config.CapDrop,
+		Tmpfs:       config.Tmpfs,
+		DNS:         config.DNS,
+		DNSSearch:   config.DNSSearch,
+		ExtraHosts:  config.ExtraHosts,
+		PidMode:     container.PidMode(config.PIDMode),
+		IpcMode:     container.IpcMode(config.IPCMode),
+		SecurityOpt: config.SecurityOpt,
+		Sysctls:     config.Sysctls,
 	}
 
 	if len(config.Mounts) > 0 {
@@ -270,22 +349,55 @@ func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerR
 
 	networkingConfig := &network.NetworkingConfig{}
 	if config.NetworkMode != "" && config.NetworkMode != "default" {
+		epSettings := &network.EndpointSettings{}
+		if config.NetworkConfig != nil {
+			epSettings.Aliases = config.NetworkConfig.Aliases
+			if config.NetworkConfig.IPv4 != "" || config.NetworkConfig.IPv6 != "" {
+				epSettings.IPAMConfig = &network.EndpointIPAMConfig{
+					IPv4Address: config.NetworkConfig.IPv4,
+					IPv6Address: config.NetworkConfig.IPv6,
+				}
+			}
+		}
 		networkingConfig = &network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{
-				config.NetworkMode: {},
+				config.NetworkMode: epSettings,
 			},
 		}
 	}
 
-	resp, err := c.cli.ContainerCreate(ctx, &container.Config{
+	containerConfig := &container.Config{
 		Image:        config.Image,
 		Env:          envVars,
 		Cmd:          config.Cmd,
+		Entrypoint:   config.Entrypoint,
 		WorkingDir:   config.WorkingDir,
 		User:         config.User,
 		Hostname:     config.Hostname,
+		Domainname:   config.Domainname,
+		Labels:       config.Labels,
+		Tty:          config.TTY,
+		OpenStdin:    config.OpenStdin,
 		ExposedPorts: getExposedPorts(config.PortBindings),
-	}, hostConfig, networkingConfig, nil, tmpName)
+	}
+
+	if config.Healthcheck != nil {
+		containerConfig.Healthcheck = &container.HealthConfig{
+			Test:    config.Healthcheck.Test,
+			Retries: int(config.Healthcheck.Retries),
+		}
+		if config.Healthcheck.Interval != 0 {
+			containerConfig.Healthcheck.Interval = time.Duration(config.Healthcheck.Interval) * time.Millisecond
+		}
+		if config.Healthcheck.Timeout != 0 {
+			containerConfig.Healthcheck.Timeout = time.Duration(config.Healthcheck.Timeout) * time.Millisecond
+		}
+		if config.Healthcheck.StartPeriod != 0 {
+			containerConfig.Healthcheck.StartPeriod = time.Duration(config.Healthcheck.StartPeriod) * time.Millisecond
+		}
+	}
+
+	resp, err := c.cli.ContainerCreate(ctx, containerConfig, hostConfig, networkingConfig, nil, tmpName)
 	if err != nil {
 		return "", fmt.Errorf("create container: %w", err)
 	}
@@ -316,20 +428,55 @@ func (c *Client) RecreateContainer(ctx context.Context, config *model.ContainerR
 	return resp.ID[:12], nil
 }
 
-func (c *Client) PullImage(ctx context.Context, imageName string) (bool, error) {
+func (c *Client) PullImage(ctx context.Context, imageName string, progressFn func(string, string)) (upToDate bool, err error) {
+	digestBefore := c.getImageDigest(ctx, imageName)
+
 	pullReader, err := c.cli.ImagePull(ctx, imageName, image.PullOptions{})
 	if err != nil {
 		return false, fmt.Errorf("pull image %s: %w", imageName, err)
 	}
 	defer pullReader.Close()
 
-	decoder := json.NewDecoder(pullReader)
-	var hasUpdate bool
-	for decoder.Decode(new(any)) == nil {
-		hasUpdate = true
+	type pullStatus struct {
+		Status         string `json:"status"`
+		Progress       string `json:"progress"`
+		ID             string `json:"id"`
+		ProgressDetail struct {
+			Current int64 `json:"current"`
+			Total   int64 `json:"total"`
+		} `json:"progressDetail"`
 	}
 
-	return hasUpdate, nil
+	decoder := json.NewDecoder(pullReader)
+	for {
+		var ps pullStatus
+		if err := decoder.Decode(&ps); err != nil {
+			break
+		}
+		if progressFn != nil {
+			msg := ps.Status
+			if ps.ID != "" {
+				msg = ps.ID + ": " + msg
+			}
+			if ps.Progress != "" {
+				msg = msg + " " + ps.Progress
+			}
+			progressFn("pulling", msg)
+		}
+	}
+
+	digestAfter := c.getImageDigest(ctx, imageName)
+	upToDate = digestBefore != "" && digestBefore == digestAfter
+
+	return upToDate, nil
+}
+
+func (c *Client) getImageDigest(ctx context.Context, imageName string) string {
+	img, _, err := c.cli.ImageInspectWithRaw(ctx, imageName)
+	if err != nil {
+		return ""
+	}
+	return img.ID
 }
 
 func getExposedPorts(portBindings map[string][]model.PortBinding) map[nat.Port]struct{} {

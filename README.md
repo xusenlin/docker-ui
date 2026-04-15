@@ -5,6 +5,7 @@
 ## 功能
 
 - **容器管理**：查看列表、查看详情、启停操作
+- **镜像更新**：拉取最新镜像并重建容器，实时显示进度
 - **镜像管理**：查看本地镜像
 - **认证**：简单的用户密码认证
 
@@ -15,6 +16,18 @@
 
 ### 镜像管理
 ![Images](screenshots/images.png)
+
+### 容器详情 - 更新按钮
+![Container Detail - Update](screenshots/container-detail-update.png)
+
+### 容器详情 - 自身容器不可更新
+![Container Detail - Self](screenshots/container-detail-self.png)
+
+### 镜像已是最新
+![Container Update - Up To Date](screenshots/container-update-uptodate.png)
+
+### 更新失败
+![Container Update - Failed](screenshots/container-update-failed.png)
 
 ## 快速开始
 
