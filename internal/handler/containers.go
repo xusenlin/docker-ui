@@ -189,18 +189,39 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	sendProgress := func(status string, message string) {
-		fmt.Fprintf(w, "event: progress\ndata: {\"status\":\"%s\",\"message\":\"%s\"}\n\n", status, message)
+	// 用 json.Marshal 生成 payload，避免 message 中的引号 / 反斜杠 / 换行
+	// 破坏 JSON 或 SSE 协议（pull 镜像的进度信息很容易包含这些字符）。
+	sendProgress := func(status, message string) {
+		payload, err := json.Marshal(map[string]string{
+			"status":  status,
+			"message": message,
+		})
+		if err != nil {
+			payload = []byte(`{"status":"error","message":"marshal failed"}`)
+		}
+		fmt.Fprintf(w, "event: progress\ndata: %s\n\n", payload)
 		flusher.Flush()
 	}
 
-	sendError := func(err string) {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err)
+	sendError := func(errMsg string) {
+		// SSE 的 data 行不能包含换行，先做替换
+		safe := strings.ReplaceAll(errMsg, "\n", " ")
+		safe = strings.ReplaceAll(safe, "\r", " ")
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", safe)
 		flusher.Flush()
 	}
 
+	// 1. 获取容器详情（用于显示 image 名等）
 	sendProgress("starting", "Getting container details...")
 	detail, err := h.docker.GetContainerDetail(r.Context(), id)
+	if err != nil {
+		sendError(err.Error())
+		return
+	}
+
+	// 2. 获取容器创建时绑定的镜像 SHA。
+	//    这是判断 "已经是最新版" 的关键依据，不能依赖镜像 pull 前后的 digest。
+	containerImageSHA, err := h.docker.GetContainerImageID(r.Context(), id)
 	if err != nil {
 		sendError(err.Error())
 		return
@@ -215,9 +236,10 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 3. 拉取最新镜像
 	sendProgress("pulling", "Pulling latest image...")
-	upToDate, err := h.docker.PullImage(r.Context(), imageName, func(status string, detail string) {
-		sendProgress("pulling", detail)
+	upToDate, err := h.docker.PullImage(r.Context(), imageName, containerImageSHA, func(status string, detailMsg string) {
+		sendProgress("pulling", detailMsg)
 	})
 	if err != nil {
 		sendError(fmt.Sprintf("pull image failed: %v", err))
@@ -231,6 +253,7 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	sendProgress("pulled", "New image pulled successfully")
 
+	// 4. 收集重建配置
 	sendProgress("config", "Getting container configuration...")
 	config, err := h.docker.GetRecreateConfig(r.Context(), id)
 	if err != nil {
@@ -238,6 +261,7 @@ func (h *ContainerHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 5. 重建容器
 	sendProgress("creating", "Creating new container...")
 	newID, err := h.docker.RecreateContainer(r.Context(), config)
 	if err != nil {

@@ -10,15 +10,15 @@
 
 # Default values
 IMG ?= ghcr.io/xusenlin/docker-ui:latest
-PLATFORM ?= linux/amd64
+PLATFORM ?= linux/amd64,linux/arm64
 
 .PHONY: build
 build: ## Build Docker image (IMG=xxx PLATFORM=linux/arm64)
 	docker build -t $(IMG) --platform $(PLATFORM) .
 
 .PHONY: push
-push: ## Push Docker image to registry
-	docker push $(IMG)
+push: ## Build and push multi-arch Docker image to registry
+	docker buildx build --platform $(PLATFORM) -t $(IMG) --push .
 
 .PHONY: run
 run: ## Run container (set AUTH_USER and AUTH_PASS env vars, or update defaults below)
